@@ -32,8 +32,13 @@ jobs:
           java-version: '17'
           cache: gradle
 
+      # v3 的默认 packages 是 "tools platform-tools"，但 Google 已下架 tools 包，
+      # sdkmanager 会报 Failed to find package 'tools' 并让整个 action 失败（v4 已修复默认值）。
+      # 这里用 v4，并显式写死 packages 做双保险。
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools'
 
       - name: Install SDK packages
         run: |
