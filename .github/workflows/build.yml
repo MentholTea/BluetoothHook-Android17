@@ -1,0 +1,116 @@
+name: Build APK
+
+on:
+  push:
+    branches: [ main, master ]
+    tags: [ 'v*' ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx3g -Dorg.gradle.daemon=false"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 上传到 GitHub 的 zip 不保留可执行位，必须补 chmod，否则 ./gradlew 报 Permission denied
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install SDK packages
+        run: |
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0" "build-tools;35.0.0"
+
+      - name: Show toolchain versions
+        run: |
+          java -version
+          ./gradlew --version
+
+      - name: Prepare signing key
+        env:
+          KS_B64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
+          STORE_PASS_IN: ${{ secrets.SIGNING_STORE_PASSWORD }}
+          KEY_ALIAS_IN: ${{ secrets.SIGNING_KEY_ALIAS }}
+          KEY_PASS_IN: ${{ secrets.SIGNING_KEY_PASSWORD }}
+        run: |
+          if [ -n "$KS_B64" ]; then
+            echo "使用仓库 Secrets 里的签名密钥"
+            printf '%s' "$KS_B64" | base64 -d > release.keystore
+            {
+              echo "STORE_PASS=$STORE_PASS_IN"
+              echo "KEY_ALIAS=$KEY_ALIAS_IN"
+              echo "KEY_PASS=$KEY_PASS_IN"
+            } >> "$GITHUB_ENV"
+          else
+            echo "未配置 Secrets，生成本次构建专用的临时签名密钥"
+            keytool -genkeypair -v -keystore release.keystore -alias bthook \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass android -keypass android \
+              -dname "CN=BluetoothHook-Android17, OU=dev, O=dev, L=CN, ST=CN, C=CN"
+            {
+              echo "STORE_PASS=android"
+              echo "KEY_ALIAS=bthook"
+              echo "KEY_PASS=android"
+            } >> "$GITHUB_ENV"
+          fi
+
+      # release APK：正式交付版本，用上面的密钥签名（见下方说明：同一份密钥才能覆盖升级）
+      - name: Build signed release APK
+        run: |
+          ./gradlew assembleRelease --stacktrace \
+            -Pandroid.injected.signing.store.file="$PWD/release.keystore" \
+            -Pandroid.injected.signing.store.password="$STORE_PASS" \
+            -Pandroid.injected.signing.key.alias="$KEY_ALIAS" \
+            -Pandroid.injected.signing.key.password="$KEY_PASS"
+
+      # debug APK：仅用于排障（带 debuggable 标记），失败不影响正式版上传
+      - name: Build debug APK
+        continue-on-error: true
+        run: chmod +x ./gradlew && ./gradlew assembleDebug --stacktrace
+
+      - name: Collect APKs
+        if: always()
+        run: |
+          mkdir -p out
+          cp app/build/outputs/apk/release/app-release.apk \
+             out/BluetoothHook-Android17-release.apk 2>/dev/null || true
+          find app/build/outputs/apk/release -name "*-unsigned.apk" -print -exec \
+             sh -c 'cp "$1" "out/BluetoothHook-Android17-$(basename "$1")"' _ {} \; 2>/dev/null || true
+          cp app/build/outputs/apk/debug/app-debug.apk \
+             out/BluetoothHook-Android17-debug.apk 2>/dev/null || true
+          ls -lh out || true
+
+      - name: Upload APK artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: BluetoothHook-Android17-apk
+          path: out/*.apk
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Attach APKs to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/*.apk
+          generate_release_notes: true

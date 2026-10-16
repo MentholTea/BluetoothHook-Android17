@@ -1,0 +1,21 @@
+*.iml
+.gradle
+/local.properties
+/.idea/
+.DS_Store
+/build
+/app/build
+/out
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+
+# Kotlin build files
+.kotlin/
+
+# 签名文件：绝对不要提交
+*.keystore
+*.jks
+release.keystore
+keystore.properties
