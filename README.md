@@ -161,7 +161,7 @@ Failed to deliver to scan client: com.android.bluetooth.le_scan.ScanClient#mScan
    - `BluetoothHook-Android17-release.apk` ← **正式版，用这个**
    - `BluetoothHook-Android17-debug.apk` ← 仅用于排障（带 `debuggable` 标记）
 
-推 `v*` 形式的 tag（例如 `v1.1`）会自动创建 Release 并附上 APK。
+推 `v*` 形式的 tag（例如 `v2.0`）会自动创建 Release 并附上 APK。
 
 > 未配置 Secrets 时，每次构建都会生成**一次性签名密钥**，所以不同次构建的 release APK 签名不同，
 > 覆盖安装会失败（报 `INSTALL_FAILED_UPDATE_INCOMPATIBLE`），需要先卸载。
@@ -253,8 +253,13 @@ adb logcat | grep BTHook
 - 看不到虚拟设备 → 确认框架里模块**已启用**且作用域勾了 `com.android.bluetooth`，然后开关一次蓝牙或重启
 - **框架里根本看不到本模块** → 框架版本太旧，不支持 modern API 102。换 Vector 或 LSPosed v2.2.1+
 - 改了配置不生效 → 配置是实时读取的，但需要有一次扫描在进行；下拉刷新 / 重新进扫描页
-- **改了配置，蓝牙进程那边一直是旧值** → Remote Preferences 是**快照**语义，读到后不会自动刷新
-  （`XposedService.getRemotePreferences()` 会缓存实例）。开关一次蓝牙让模块重新加载即可
+- **改了配置，蓝牙进程那边一直是旧值** → 注入进程侧的 Remote Preferences 是**只读**的，
+  靠框架回调增量推送（`RemotePreferences.edit()` 在注入侧直接抛 `UnsupportedOperationException`，
+  这是 API 设计，不是 bug）。写入路径是
+  `RemotePreferences.Editor.commit()` → `IXposedService.updateRemotePreferences` → 框架 daemon →
+  注入进程 callback。所以旧值只可能是回调没连上：确认框架支持 remote preferences
+  （`PROP_CAP_REMOTE` 未置位时日志会打「当前框架不支持 remote preferences」），
+  或开关一次蓝牙让模块重新加载
 - 只看到真实设备 → 看日志有没有 `Injected virtual device`，没有的话把日志贴出来
 - 目标 App 扫不到但别的 App 能扫到 → 该 App 可能用了 `PendingIntent` 方式的扫描，
   或者按 service UUID / 名称做了过滤，把虚拟设备的广播数据改成符合它过滤条件的内容
@@ -266,13 +271,16 @@ adb logcat | grep BTHook
 
 ```
 模拟蓝牙设备-Android17/
-├── BluetoothHook-Android17-release.apk   ← 正式版，直接安装
+├── BluetoothHook-Android17-release.apk   ← 正式版 v2.0，直接安装
 ├── BluetoothHook-Android17-debug.apk     ← 排障用（带 debuggable 标记）
 ├── README.md                              ← 本文件
+├── 上传到GitHub-详细步骤.md                 ← 建仓 / PAT / 推送 / Secrets 的全流程
+├── make-release.ps1                       ← 打 tag 推送，让 CI 生成 Releases 页面
 ├── 源码/
 │   └── BluetoothHook-Android17-src.zip   ← 完整源码，含 GitHub Actions 工作流
 └── 签名密钥/
-    └── bluetoothhook-release.keystore    ← 与 release APK 配套的签名密钥
+    ├── bluetoothhook-release.keystore    ← 与 release APK 配套的签名密钥
+    └── keystore-base64.txt               ← 上面这份密钥的 base64（整行贴进 Secrets 用）
 ```
 
 > ⚠️ **签名密钥很重要**：以后重新构建想覆盖升级，必须用同一份 `bluetoothhook-release.keystore`
