@@ -289,7 +289,7 @@ adb logcat | grep BTHook
 ├── BluetoothHook-Android17-release.apk   ← 正式版 v2.1，直接安装
 ├── BluetoothHook-Android17-debug.apk     ← 排障用（带 debuggable 标记）
 ├── README.md                              ← 本文件
-├── 上传到GitHub-详细步骤.md                 ← 建仓 / PAT / 推送 / Secrets 的全流程
+├── 上传到GitHub-详细步骤.md                 ← 建仓 / 浏览器授权推送 / Secrets 的全流程
 ├── push-to-github.ps1                     ← 推送提交到 main（只产生 Actions Artifacts）
 ├── make-release.ps1                       ← 打 tag 推送，让 CI 生成 Releases 页面
 ├── 源码/
