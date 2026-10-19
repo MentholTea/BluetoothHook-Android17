@@ -7,11 +7,12 @@
 `8a8ecc41`，2025-12-22）的 **Android 17 兼容分支**：上游在 Android 17 上只能扫到真实设备，
 虚拟设备一个都不出现。
 
-本分支做了**两层**适配：
+本分支做了**三层**适配：
 
 1. **字段改名**（v1.1）：Android 17 把扫描投递相关的类从 Java 重写成 Kotlin，内部字段去掉了 `m` 前缀
 2. **Xposed API 迁移**（v2.0）：旧版 Xposed API 在 Android 17 上已被禁用，本分支整体迁移到
    **libxposed modern API 102**
+3. **交互修正**（v2.1）：Hook 状态冷启动误报「未激活」、关于页版本号与仓库地址写死，详见「二之三」
 
 ---
 
@@ -91,7 +92,7 @@ Failed to deliver to scan client: com.android.bluetooth.le_scan.ScanClient#mScan
 | 作用域 | `xposedscope` meta-data | `META-INF/xposed/scope.list`，一行一个包名 |
 | 入口基类 | 实现 `IXposedHookLoadPackage` 接口 | 继承 `io.github.libxposed.api.XposedModule`，重写 `onModuleLoaded` / `onPackageReady` |
 | 反射工具 | `XposedHelpers.findAndHookMethod(...)` | **已移除**。改用 `xposed.hook(method).intercept { chain -> ... }`，配 `ReflectCompat` 纯 JDK 反射找类找方法 |
-| 配置传递 | `XSharedPreferences` 直接读模块的私有 XML | **模块 App 自身不再被 hook**，改用 Remote Preferences：App 侧 `XposedService.getRemotePreferences()` 写，模块侧读到快照 |
+| 配置传递 | `XSharedPreferences` 直接读模块的私有 XML | **模块 App 自身不再被 hook**，改用 Remote Preferences：App 侧可写，注入进程侧只读，改动由框架回调增量推送 |
 | 日志 | `XposedBridge.log(...)` | `XposedInterface.log(...)`，本分支封装在 `utils/Logger.kt` 的 `Logger.bind(xposed)` |
 
 两条现代 API 带来的硬约束，构建时容易卡住：
@@ -104,6 +105,20 @@ Failed to deliver to scan client: com.android.bluetooth.le_scan.ScanClient#mScan
   source/target compatibility `isCompatibleWith(VERSION_14)`，否则 dex 阶段报
   `Attempt to create a global synthetic for 'Record desugaring' without a global-synthetics consumer`
   （release 变体因为 `debuggable=false` 反而不会触发，所以「release 能过、debug 过不去」是这个原因）
+
+## 二之三、v2.1 修掉的三个交互问题
+
+v2.0 在真机上跑通后暴露的都不是注入逻辑的问题，而是 App 界面的时序与硬编码：
+
+| 现象 | 根因 | 修法 |
+|---|---|---|
+| 每次清后台重进，先闪「Hook未激活」，点右上角刷新又变「已激活」 | `ConfigBridge.getHookStatus()` 开头 `service ?: return "Inactive"`。框架 binder 是 `XposedProvider.call()` 在 binder 线程**异步**送进来的，ViewModel `init` 同步查询时必然还没到 | 加三态 `connected: StateFlow<Boolean?>`（`null` 等待 / `false` 确定连不上 / `true` 已连上）+ `FRAMEWORK_BIND_TIMEOUT_MS = 1500ms` 超时兜底；ViewModel 改用 `awaitHookStatus()` 挂起等待，之后 `collect` 跟随连接状态自动刷新。等待期内显示「正在检测…」而不是「未激活」 |
+| 关于页版本号永远是 `1.0.0` | `SettingsScreen.kt` 里 `text = "版本 1.0.0"` 是硬编码字符串 | 读 `BuildConfig.VERSION_NAME`，并在 `build.gradle.kts` 打开 `buildFeatures { buildConfig = true }`（AGP 8 起默认关闭） |
+| 关于页「开源项目」链到上游 `jingyu233/bluetoothhook` | `val githubUrl` 写的是上游地址 | 改为 `https://github.com/MentholTea/BluetoothHook-Android17` |
+
+顺带把界面里残留的「请在 LSPosed 中启用模块」「作用域要勾系统框架」等 legacy 时代文案改掉了 ——
+modern API 下作用域由 `module.prop` 的 `staticScope=true` + `scope.list` 固定，用户不需要也不应该在
+框架里手动勾选。
 
 ## 三、⚠️ 重要限制：这是"本机注入"，不是真广播
 
@@ -161,7 +176,7 @@ Failed to deliver to scan client: com.android.bluetooth.le_scan.ScanClient#mScan
    - `BluetoothHook-Android17-release.apk` ← **正式版，用这个**
    - `BluetoothHook-Android17-debug.apk` ← 仅用于排障（带 `debuggable` 标记）
 
-推 `v*` 形式的 tag（例如 `v2.0`）会自动创建 Release 并附上 APK。
+推 `v*` 形式的 tag（例如 `v2.1`）会自动创建 Release 并附上 APK。
 
 > 未配置 Secrets 时，每次构建都会生成**一次性签名密钥**，所以不同次构建的 release APK 签名不同，
 > 覆盖安装会失败（报 `INSTALL_FAILED_UPDATE_INCOMPATIBLE`），需要先卸载。
@@ -271,7 +286,7 @@ adb logcat | grep BTHook
 
 ```
 模拟蓝牙设备-Android17/
-├── BluetoothHook-Android17-release.apk   ← 正式版 v2.0，直接安装
+├── BluetoothHook-Android17-release.apk   ← 正式版 v2.1，直接安装
 ├── BluetoothHook-Android17-debug.apk     ← 排障用（带 debuggable 标记）
 ├── README.md                              ← 本文件
 ├── 上传到GitHub-详细步骤.md                 ← 建仓 / PAT / 推送 / Secrets 的全流程

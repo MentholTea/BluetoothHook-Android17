@@ -21,6 +21,7 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.jingyu233.bluetoothhook.BuildConfig
 import com.jingyu233.bluetoothhook.ui.viewmodel.SettingsViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -140,6 +141,19 @@ fun SettingsSection(
     }
 }
 
+/**
+ * 把 ConfigBridge 返回的状态码翻译成中文。
+ *
+ * `Unknown` 特意译成「正在检测」而不是「未知」：它只出现在模块 App 刚启动、
+ * 框架 binder 还没送到的几百毫秒里，说「未知」会让用户以为出了故障。
+ */
+fun hookStatusLabel(status: String): String = when (status) {
+    "Active" -> "已激活"
+    "Inactive" -> "未激活"
+    "Unknown" -> "正在检测…"
+    else -> status
+}
+
 @Composable
 fun HookStatusDetailCard(
     status: String,
@@ -155,7 +169,7 @@ fun HookStatusDetailCard(
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "当前状态: $status",
+                        text = "当前状态: ${hookStatusLabel(status)}",
                         style = MaterialTheme.typography.titleMedium
                     )
                     Spacer(modifier = Modifier.height(4.dp))
@@ -180,8 +194,8 @@ fun HookStatusDetailCard(
             )
             Spacer(modifier = Modifier.height(8.dp))
             Text(
-                text = "1. 在LSPosed管理器中启用本模块\n" +
-                        "2. 确保模块作用域包含\"系统框架\"和\"com.android.bluetooth\"\n" +
+                text = "1. 在 Vector 或 LSPosed 管理器中启用本模块（两者只能启用一个）\n" +
+                        "2. 本模块已在 module.prop 里固定作用域为 com.android.bluetooth，无需手动勾选\n" +
                         "3. 重启系统或重启蓝牙服务\n" +
                         "4. Hook激活后，虚拟设备会自动出现在蓝牙扫描结果中",
                 style = MaterialTheme.typography.bodySmall,
@@ -511,7 +525,9 @@ fun ImportExportCard(
 @Composable
 fun AboutCard() {
     val context = LocalContext.current
-    val githubUrl = "https://github.com/jingyu233/bluetoothhook"
+    // 指向本分支的仓库（上游 jingyu233/BluetoothHook 不支持 Android 17）
+    val githubUrl = "https://github.com/MentholTea/BluetoothHook-Android17"
+    val versionName = BuildConfig.VERSION_NAME
 
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
@@ -520,7 +536,7 @@ fun AboutCard() {
                 style = MaterialTheme.typography.titleLarge
             )
             Text(
-                text = "版本 1.0.0",
+                text = "版本 $versionName",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )

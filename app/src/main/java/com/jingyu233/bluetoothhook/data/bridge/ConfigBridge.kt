@@ -2,10 +2,17 @@ package com.jingyu233.bluetoothhook.data.bridge
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.os.Handler
+import android.os.Looper
 import com.jingyu233.bluetoothhook.data.model.VirtualDevice
 import com.jingyu233.bluetoothhook.utils.Logger
 import io.github.libxposed.service.XposedService
 import io.github.libxposed.service.XposedServiceHelper
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
@@ -52,8 +59,36 @@ class ConfigBridge(context: Context) {
         @Volatile
         private var listenerRegistered = false
 
+        /**
+         * 框架连接状态的可观察版本。
+         *
+         * `null` = 尚未有结果（进程刚起来，框架 binder 还在路上）；
+         * `false` = 明确连不上（框架未启用 / 模块未激活）；
+         * `true`  = 已连上。
+         *
+         * UI 用它来区分「还在等」和「真的没激活」—— 旧实现在这两者之间都返回
+         * `Inactive`，于是冷启动第一帧必然闪一下「Hook未激活」。
+         */
+        private val _connected = MutableStateFlow<Boolean?>(null)
+        val connected: StateFlow<Boolean?> = _connected.asStateFlow()
+
+        /**
+         * 等待框架 binder 的最长时间。
+         *
+         * 模块 App 冷启动时，框架是在 `ContentProvider.onCreate` 之后才把 binder
+         * 送进来的（`XposedProvider.call()` 走 binder 线程），而 ViewModel 的
+         * `init` 往往更早跑完。等这么久还没等到，就认定框架确实没连上。
+         */
+        const val FRAMEWORK_BIND_TIMEOUT_MS = 1500L
+
         /** 是否已连上框架（供 UI 显示状态） */
         fun isFrameworkConnected(): Boolean = service != null
+
+        /**
+         * 框架是否**确定**连不上（等待期结束后仍未收到 binder）。
+         * 等待期内返回 false，避免 UI 过早判定为未激活。
+         */
+        fun isFrameworkConfirmedMissing(): Boolean = _connected.value == false
     }
 
     private val appContext = context.applicationContext
@@ -75,6 +110,10 @@ class ConfigBridge(context: Context) {
      *
      * 框架会在模块 App 启动后主动把服务 binder 送进来；这里注册监听后
      * 可能立即触发 `onServiceBind`（binder 早于监听注册到达的情况）。
+     *
+     * 注册完再挂一个 [FRAMEWORK_BIND_TIMEOUT_MS] 的超时检查：超时还没收到
+     * binder，才把 [connected] 置为 `false`。这样 UI 不会在冷启动第一帧
+     * 就误报「未激活」。
      */
     private fun ensureServiceListener() {
         if (listenerRegistered) return
@@ -85,6 +124,7 @@ class ConfigBridge(context: Context) {
                 XposedServiceHelper.registerListener(object : XposedServiceHelper.OnServiceListener {
                     override fun onServiceBind(svc: XposedService) {
                         service = svc
+                        _connected.value = true
                         Logger.App.i(
                             TAG,
                             "已连接 Xposed 框架: ${svc.frameworkName} ${svc.frameworkVersion} " +
@@ -93,12 +133,30 @@ class ConfigBridge(context: Context) {
                     }
 
                     override fun onServiceDied(svc: XposedService) {
-                        if (service === svc) service = null
+                        if (service === svc) {
+                            service = null
+                            _connected.value = false
+                        }
                         Logger.App.w(TAG, "Xposed 框架服务已断开")
                     }
                 })
                 Logger.App.d(TAG, "XposedServiceHelper listener registered")
+
+                // registerListener 里如果缓存里已有 binder，会同步回调 onServiceBind，
+                // 此时 _connected 已是 true，不必再挂超时。
+                if (service == null) {
+                    Handler(Looper.getMainLooper()).postDelayed({
+                        if (service == null) {
+                            _connected.value = false
+                            Logger.App.w(
+                                TAG,
+                                "等待框架 binder 超时（${FRAMEWORK_BIND_TIMEOUT_MS}ms），判定为未连接"
+                            )
+                        }
+                    }, FRAMEWORK_BIND_TIMEOUT_MS)
+                }
             } catch (t: Throwable) {
+                _connected.value = false
                 Logger.App.e(TAG, "注册 XposedServiceHelper 监听失败", t)
             }
         }
@@ -207,13 +265,19 @@ class ConfigBridge(context: Context) {
      *
      * modern API 下模块 App 自身**不再被注入**，所以旧版「hook Application 写
      * `xposed_active` 标记」的探测方式彻底失效。改为直接问框架：
-     * - 服务都没连上 → `Inactive`
-     * - 连上了但从没成功写过配置 → `Active`（框架认可模块，只是还没扫描过）
+     * - 还在等框架 binder → `Unknown`（**不能报未激活**，否则冷启动必闪）
+     * - 等待超时 / 服务断开 → `Inactive`
+     * - 连上了但没有作用域 → `Inactive`
+     * - 连上了且有作用域 → `Active`
      *
      * 返回值保持旧接口的字符串形式，避免改动调用方。
      */
     fun getHookStatus(): String {
-        val svc = service ?: return "Inactive"
+        val svc = service
+        if (svc == null) {
+            // 等待期内（connected == null）如实说「未知」，不要谎报未激活
+            return if (_connected.value == null) "Unknown" else "Inactive"
+        }
         return try {
             val scope = svc.scope
             if (scope.isEmpty()) {
@@ -225,6 +289,18 @@ class ConfigBridge(context: Context) {
             Logger.App.e(TAG, "Failed to read hook status", t)
             "Unknown"
         }
+    }
+
+    /**
+     * 等框架 binder 落地后再查状态（冷启动用）。
+     *
+     * 收到 binder 或超时都会返回；最多等 [timeoutMs]，不会把 UI 卡住。
+     */
+    suspend fun awaitHookStatus(timeoutMs: Long = FRAMEWORK_BIND_TIMEOUT_MS + 800L): String {
+        withTimeoutOrNull(timeoutMs) {
+            connected.first { it != null }
+        }
+        return getHookStatus()
     }
 
     /** 清空所有配置 */

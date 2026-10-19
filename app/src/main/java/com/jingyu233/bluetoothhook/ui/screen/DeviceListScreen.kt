@@ -155,21 +155,24 @@ fun HookStatusCard(
     status: String,
     modifier: Modifier = Modifier
 ) {
-    val (color, icon, text) = when (status) {
-        "Active" -> Triple(
+    val (color, icon, text, hint) = when (status) {
+        "Active" -> Quadruple(
             MaterialTheme.colorScheme.primaryContainer,
             Icons.Default.CheckCircle,
-            "Hook已激活"
+            "Hook已激活",
+            "模块已生效，虚拟设备会出现在蓝牙扫描结果中"
         )
-        "Unknown" -> Triple(
+        "Unknown" -> Quadruple(
             MaterialTheme.colorScheme.surfaceVariant,
             Icons.Default.Info,
-            "Hook状态未知"
+            "正在检测…",
+            "正在与 Xposed 框架建立连接"
         )
-        else -> Triple(
+        else -> Quadruple(
             MaterialTheme.colorScheme.errorContainer,
             Icons.Default.Warning,
-            "Hook未激活"
+            "Hook未激活",
+            "请在 Vector / LSPosed 中启用模块并重启蓝牙服务"
         )
     }
 
@@ -192,13 +195,16 @@ fun HookStatusCard(
                     fontWeight = FontWeight.Bold
                 )
                 Text(
-                    text = "请在LSPosed中启用模块并重启蓝牙服务",
+                    text = hint,
                     style = MaterialTheme.typography.bodySmall
                 )
             }
         }
     }
 }
+
+/** 四元组（Kotlin 标准库只有 Triple） */
+private data class Quadruple<A, B, C, D>(val first: A, val second: B, val third: C, val fourth: D)
 
 @Composable
 fun DeviceListItem(

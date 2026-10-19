@@ -57,8 +57,17 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
 
     init {
         loadSettings()
-        refreshHookStatus()
         loadDeviceCount()
+        // Hook 状态：等框架 binder 落地再查（同 DeviceListViewModel 的原因），
+        // 之后跟随连接状态自动更新。
+        viewModelScope.launch {
+            _hookStatus.value = configBridge.awaitHookStatus()
+            ConfigBridge.connected.collect { connected ->
+                if (connected != null) {
+                    _hookStatus.value = configBridge.getHookStatus()
+                }
+            }
+        }
     }
 
     private fun loadSettings() {
@@ -83,8 +92,10 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun refreshHookStatus() {
-        _hookStatus.value = configBridge.getHookStatus()
-        Logger.App.d(TAG, "Refreshed hook status: ${_hookStatus.value}")
+        viewModelScope.launch {
+            _hookStatus.value = configBridge.awaitHookStatus()
+            Logger.App.d(TAG, "Refreshed hook status: ${_hookStatus.value}")
+        }
     }
 
     fun refreshDeviceCount() {

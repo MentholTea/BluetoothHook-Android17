@@ -38,13 +38,22 @@ class DeviceListViewModel(application: Application) : AndroidViewModel(applicati
         // 加载全局开关状态
         _globalEnabled.value = configBridge.getGlobalEnabled()
 
-        // 加载Hook状态
-        _hookStatus.value = configBridge.getHookStatus()
-
         // 监听设备列表变化，自动同步到SharedPreferences
         viewModelScope.launch {
             devices.collect { deviceList ->
                 syncToConfigBridge(deviceList)
+            }
+        }
+
+        // Hook 状态：框架 binder 是异步送进来的，这里等它落地再查，
+        // 否则冷启动第一帧必然显示「Hook未激活」，点刷新才变「已激活」。
+        viewModelScope.launch {
+            _hookStatus.value = configBridge.awaitHookStatus()
+            // 之后框架连上/断开都自动跟随，不用再手点刷新
+            ConfigBridge.connected.collect { connected ->
+                if (connected != null) {
+                    _hookStatus.value = configBridge.getHookStatus()
+                }
             }
         }
     }
@@ -88,9 +97,15 @@ class DeviceListViewModel(application: Application) : AndroidViewModel(applicati
 
     /**
      * 刷新Hook状态
+     *
+     * 注意：正常情况下不需要点刷新 —— 框架连接状态变化会通过
+     * [ConfigBridge.connected] 自动推过来。这个函数保留给「框架刚重启、
+     * binder 需要重新拉」的兜底场景。
      */
     fun refreshHookStatus() {
-        _hookStatus.value = configBridge.getHookStatus()
-        Logger.App.d(TAG, "Refreshed hook status: ${_hookStatus.value}")
+        viewModelScope.launch {
+            _hookStatus.value = configBridge.awaitHookStatus()
+            Logger.App.d(TAG, "Refreshed hook status: ${_hookStatus.value}")
+        }
     }
 }

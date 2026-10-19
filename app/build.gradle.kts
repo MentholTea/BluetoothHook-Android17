@@ -15,8 +15,8 @@ android {
         applicationId = "com.jingyu233.bluetoothhook"
         minSdk = 29
         targetSdk = 36
-        versionCode = 3
-        versionName = "2.0"
+        versionCode = 4
+        versionName = "2.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -47,6 +47,9 @@ android {
     }
     buildFeatures {
         compose = true
+        // 关于页要显示真实版本号（读 BuildConfig.VERSION_NAME），
+        // AGP 8 起 buildConfig 默认关闭，必须显式打开。
+        buildConfig = true
     }
 }
 
