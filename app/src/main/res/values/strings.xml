@@ -1,3 +1,4 @@
 <resources>
-    <string name="app_name">bluetoothhook</string>
+    <string name="app_name">BluetoothHook</string>
+    <string name="module_description">Inject virtual Bluetooth LE devices (name / MAC / advertising data / interval) into system scan results for development and debugging.</string>
 </resources>

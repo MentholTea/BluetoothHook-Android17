@@ -8,14 +8,15 @@ plugins {
 
 android {
     namespace = "com.jingyu233.bluetoothhook"
-    compileSdk = 36
+    // libxposed:service 102.0.0 的 aar-metadata 要求 minCompileSdk=37
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "com.jingyu233.bluetoothhook"
         minSdk = 29
         targetSdk = 36
-        versionCode = 2
-        versionName = "1.1"
+        versionCode = 3
+        versionName = "2.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -30,11 +31,19 @@ android {
         }
     }
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_11
-        targetCompatibility = JavaVersion.VERSION_11
+        // 必须 >= Java 17：AGP 的 ComponentImpl.isGlobalSyntheticsEnabled() 逻辑是
+        //   ENABLE_API_MODELING_AND_GLOBAL_SYNTHETICS ?: (debuggable ? javaLevel > 14 : true)
+        // debug 变体 debuggable=true，若语言级别只有 11 则 global synthetics 被关掉，
+        // dex 外部库（libxposed:service 含 Java record）时报
+        // "Attempt to create a global synthetic for 'Record desugaring'".
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+        // libxposed:service 102.0.0 内部使用 Java record，D8 需要开启 core library
+        // desugaring 才能生成 record 的 global synthetic。
+        isCoreLibraryDesugaringEnabled = true
     }
     kotlinOptions {
-        jvmTarget = "11"
+        jvmTarget = "17"
     }
     buildFeatures {
         compose = true
@@ -42,8 +51,13 @@ android {
 }
 
 dependencies {
-    // Xposed API (compileOnly - provided by LSPosed at runtime)
-    compileOnly(libs.xposed.api)
+    // core library desugaring（处理 libxposed:service 里的 Java record）
+    coreLibraryDesugaring(libs.desugar.jdk.libs)
+
+    // libxposed modern API（API 102）。compileOnly：运行时由框架提供。
+    compileOnly(libs.libxposed.api)
+    // service：模块 App 侧与框架通信（远程偏好 / 作用域），需要打进 APK。
+    implementation(libs.libxposed.service)
 
     // AndroidX Core
     implementation(libs.androidx.core.ktx)

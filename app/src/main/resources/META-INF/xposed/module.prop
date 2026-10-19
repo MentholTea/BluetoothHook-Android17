@@ -1,0 +1,13 @@
+# libxposed modern API 的模块配置（Java Properties 格式）
+#
+# minApiVersion    : 模块要求的最低 Xposed API 版本
+# targetApiVersion : 模块面向的 Xposed API 版本
+# staticScope      : 作用域固定，不建议用户在本清单之外启用
+# exceptionMode    : hook 抛异常时的默认处理，protective = 记录日志并继续原方法
+#
+# 注意：这里只写 API 版本与行为开关；模块名/描述走 android:label / android:description，
+# 作用域走同目录的 scope.list。
+minApiVersion=101
+targetApiVersion=102
+staticScope=true
+exceptionMode=protective

@@ -1,7 +1,7 @@
 package com.jingyu233.bluetoothhook.hook
 
+import android.content.SharedPreferences
 import com.jingyu233.bluetoothhook.utils.Logger
-import de.robv.android.xposed.XSharedPreferences
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
@@ -23,12 +23,15 @@ import java.util.concurrent.atomic.AtomicLong
  * `com.android.bluetooth.le_scan.ScanClient#mScannerId`，导致完全无法投递。
  * 这里改成多候选探测（[ReflectCompat]），任何一个命名命中都能工作。
  *
- * 如果所有候选都失败，会**打印一次** ScanClient / ScannerApp 的真实字段表，
- * 照着表加候选名即可，不需要再逆向。
+ * 迁移说明（legacy → libxposed API 102）：
+ * 旧实现用 `XSharedPreferences` 读模块 App 写在自身私有目录里的配置，
+ * 那是 legacy 扩展；API 102 禁止 libxposed 模块调用 legacy API。
+ * 现在改为框架提供的 remote preferences（`SharedPreferences` 接口），
+ * 每次注入前 `reload()` 以拿到 UI 进程刚写入的最新值。
  */
 class VirtualDeviceInjector(
     private val scanResultBuilder: ScanResultBuilder,
-    private val prefs: XSharedPreferences
+    private val prefs: SharedPreferences?
 ) {
     companion object {
         private val TAG = Logger.Tags.HOOK_INJECTOR
@@ -64,6 +67,16 @@ class VirtualDeviceInjector(
         prettyPrint = false
     }
 
+    /** 全局开关（remote preferences 里的 `global_enabled`，默认开启）。 */
+    fun isEnabled(): Boolean {
+        val p = prefs ?: return true
+        return try {
+            p.getBoolean(ModuleEntry.KEY_GLOBAL_ENABLED, true)
+        } catch (_: Throwable) {
+            true
+        }
+    }
+
     /**
      * 注入虚拟设备到扫描结果。
      *
@@ -79,14 +92,18 @@ class VirtualDeviceInjector(
         scanQueue: Collection<*>
     ) {
         try {
-            // SharedPreferences 可能被 UI 进程更新，每次重新加载
-            prefs.reload()
+            val p = prefs ?: return
 
-            if (!prefs.getBoolean("global_enabled", true)) {
+            if (!isEnabled()) {
                 return
             }
 
-            val devicesJson = prefs.getString("devices", "[]") ?: "[]"
+            val devicesJson = try {
+                p.getString(ModuleEntry.KEY_DEVICES, "[]") ?: "[]"
+            } catch (t: Throwable) {
+                Logger.Hook.e(TAG, "读取 devices 配置失败", t)
+                return
+            }
             if (devicesJson.isBlank() || devicesJson == "[]") {
                 return
             }

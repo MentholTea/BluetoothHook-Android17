@@ -1,29 +1,33 @@
 package com.jingyu233.bluetoothhook.hook
 
+import android.content.SharedPreferences
 import android.os.Handler
 import android.os.Looper
 import com.jingyu233.bluetoothhook.utils.Logger
-import de.robv.android.xposed.XC_MethodHook
-import de.robv.android.xposed.XSharedPreferences
-import de.robv.android.xposed.XposedBridge
-import de.robv.android.xposed.XposedHelpers
+import io.github.libxposed.api.XposedInterface
+import io.github.libxposed.api.XposedModuleInterface
 import java.lang.ref.WeakReference
 import java.lang.reflect.Method
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * 蓝牙扫描 Hook 核心类。
+ * 蓝牙扫描 Hook 核心类（libxposed modern API 102）。
  *
  * 注入点：`com.android.bluetooth.le_scan.ScanController#onScanResultInternal(...)`
- * —— 这是系统把一条真实广播转成 `ScanResult` 并投递给各扫描客户端的地方。
- * 在它返回之后追加一次虚拟设备投递即可，Android 10~17 都是同一个方法，
+ * —— 系统把一条真实广播转成 `ScanResult` 并投递给各扫描客户端的地方。
+ * 在它执行完之后追加一次虚拟设备投递即可，Android 10~17 都是同一个方法，
  * Android 17 的 Kotlin 重写**没有**改动这个方法名和签名。
  *
- * 真正在 Android 17 上失效的是投递环节的字段名，见 [VirtualDeviceInjector]。
+ * 迁移说明（legacy → API 102）：
+ * - `XposedBridge.hookMethod(method, XC_MethodHook)` → `hook(method).intercept { chain -> ... }`
+ * - `afterHookedMethod` 的语义等价于「先 `chain.proceed()` 拿到结果，再做注入」
+ * - 不再有 `MethodHookParam.thisObject`，改从 `chain.thisObject` 取
+ * - hook 找不到时抛 `HookFailedError`，这里统一 try/catch 保持旧行为（只记日志）
  */
 class BluetoothScanHook(
+    private val xposed: XposedInterface,
     private val classLoader: ClassLoader,
-    private val prefs: XSharedPreferences
+    private val prefs: SharedPreferences?
 ) {
     companion object {
         private val TAG = Logger.Tags.HOOK_SCANNER
@@ -46,7 +50,8 @@ class BluetoothScanHook(
         private val SCAN_HELPER_NAMES = arrayOf("mScanHelper", "scanHelper")
 
         /** 取「常规扫描」客户端的候选方法名 */
-        private val SCAN_QUEUE_NAMES = arrayOf("getRegularScanQueue", "getScanQueue", "regularScanQueue")
+        private val SCAN_QUEUE_NAMES =
+            arrayOf("getRegularScanQueue", "getScanQueue", "regularScanQueue")
 
         /**
          * 保活开关。
@@ -55,8 +60,6 @@ class BluetoothScanHook(
          * 如果环境里一个 BLE 广播都没有，虚拟设备就永远不会出现。
          * 打开后会在**同一个 Looper** 上按 1 秒节拍主动触发一次注入
          * （仍然受每个设备自己的「广播间隔」节流），保证虚拟设备稳定可见。
-         *
-         * 如果你的 ROM 上出现异常，把这里改成 `false` 即可退回纯回调驱动。
          */
         private const val ENABLE_KEEPALIVE = true
         private const val KEEPALIVE_TICK_MS = 1000L
@@ -79,7 +82,7 @@ class BluetoothScanHook(
 
     fun init() {
         try {
-            Logger.Hook.i(TAG, "Initializing BluetoothScanHook (Android17-compatible build)")
+            Logger.Hook.i(TAG, "Initializing BluetoothScanHook (libxposed API 102 build)")
 
             scanResultBuilder = ScanResultBuilder(classLoader)
             virtualDeviceInjector = VirtualDeviceInjector(scanResultBuilder, prefs)
@@ -95,8 +98,8 @@ class BluetoothScanHook(
                     null
                 )
             }
-        } catch (e: Throwable) {
-            Logger.Hook.e(TAG, "Failed to initialize BluetoothScanHook", e)
+        } catch (t: Throwable) {
+            Logger.Hook.e(TAG, "Failed to initialize BluetoothScanHook", t)
         }
     }
 
@@ -104,13 +107,13 @@ class BluetoothScanHook(
      * Hook `ScanController.onScanResultInternal`。
      *
      * 先用精确签名找，找不到再退化为「同名 + 11 个参数 + 第 3 个是 String」，
-     * 这样即使某个 ROM 微调了参数类型（例如 `byte[] scanRecord` 换成 `ScanRecord`）也还能挂上。
+     * 这样即使某个 ROM 微调了参数类型也还能挂上。
      */
     private fun hookScanResultInternal(): Boolean {
         var controllerClass: Class<*>? = null
         for (name in SCAN_CONTROLLER_CLASSES) {
             controllerClass = try {
-                XposedHelpers.findClass(name, classLoader)
+                Class.forName(name, false, classLoader)
             } catch (_: Throwable) {
                 null
             }
@@ -128,19 +131,23 @@ class BluetoothScanHook(
             val method = findScanResultMethod(controllerClass, methodName) ?: continue
 
             try {
-                XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
+                xposed.hook(method)
+                    .setPriority(XposedInterface.PRIORITY_DEFAULT)
+                    .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                    .intercept { chain ->
+                        // 先让原方法执行，保持真实扫描结果不受影响；
+                        // 原始异常必须原样抛出，不能被注入逻辑吞掉。
+                        val result = chain.proceed()
                         try {
-                            // 在原方法执行完之后再注入，避免影响真实扫描结果的产出
-                            injectVirtualDevices(param)
-                        } catch (e: Throwable) {
+                            injectVirtualDevices(chain.thisObject)
+                        } catch (t: Throwable) {
                             // 捕获所有异常，绝不让虚拟设备注入影响真实扫描
-                            Logger.Hook.e(TAG, "Error during virtual device injection", e)
+                            Logger.Hook.e(TAG, "Error during virtual device injection", t)
                         }
+                        result
                     }
-                })
-            } catch (e: Throwable) {
-                Logger.Hook.e(TAG, "XposedBridge.hookMethod 失败: $methodName", e)
+            } catch (t: Throwable) {
+                Logger.Hook.e(TAG, "hook() 失败: $methodName", t)
                 continue
             }
 
@@ -161,8 +168,7 @@ class BluetoothScanHook(
             //                      int primaryPhy, int secondaryPhy, int advertisingSid,
             //                      int txPower, int rssi, int periodicAdvInt,
             //                      byte[] scanRecord, String originalAddress)
-            return XposedHelpers.findMethodExact(
-                clazz,
+            return clazz.getDeclaredMethod(
                 name,
                 Int::class.javaPrimitiveType,    // eventType
                 Int::class.javaPrimitiveType,    // addressType
@@ -200,15 +206,16 @@ class BluetoothScanHook(
 
     /**
      * 从真实的扫描回调里取出 ScanController 及其依赖，然后注入虚拟设备。
+     *
+     * @param controller `chain.thisObject`，即被 hook 的 ScanController 实例
      */
-    private fun injectVirtualDevices(param: XC_MethodHook.MethodHookParam) {
+    private fun injectVirtualDevices(controller: Any?) {
         try {
-            prefs.reload()
-            if (!prefs.getBoolean("global_enabled", true)) {
+            if (controller == null) return
+
+            if (!virtualDeviceInjector.isEnabled()) {
                 return
             }
-
-            val controller = param.thisObject ?: return
 
             val scanManager = ReflectCompat.property(controller, *SCAN_MANAGER_NAMES)
 
@@ -232,8 +239,8 @@ class BluetoothScanHook(
 
             virtualDeviceInjector.injectDevices(controller, scanManager, scannerMap, scanQueue)
             startKeepaliveIfNeeded()
-        } catch (e: Throwable) {
-            Logger.Hook.e(TAG, "Error in injectVirtualDevices", e)
+        } catch (t: Throwable) {
+            Logger.Hook.e(TAG, "Error in injectVirtualDevices", t)
         }
     }
 
@@ -288,7 +295,9 @@ class BluetoothScanHook(
                         val scannerMap = scannerMapRef?.get()
                         val queue = resolveScanQueue(scanManager)
                         if (!queue.isNullOrEmpty()) {
-                            virtualDeviceInjector.injectDevices(controller, scanManager, scannerMap, queue)
+                            virtualDeviceInjector.injectDevices(
+                                controller, scanManager, scannerMap, queue
+                            )
                         }
                     } catch (t: Throwable) {
                         Logger.Hook.e(TAG, "保活注入异常", t)

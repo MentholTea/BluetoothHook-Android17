@@ -1,5 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!--
+      libxposed modern API 用 META-INF/xposed/scope.list 声明作用域，
+      不再读取 xposedscope meta-data。此文件保留为空数组仅为兼容旧引用，
+      实际作用域见 app/src/main/resources/META-INF/xposed/scope.list。
+    -->
     <string-array name="xposed_scope">
         <item>com.android.bluetooth</item>
     </string-array>

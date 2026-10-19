@@ -7,6 +7,12 @@
 `8a8ecc41`，2025-12-22）的 **Android 17 兼容分支**：上游在 Android 17 上只能扫到真实设备，
 虚拟设备一个都不出现。
 
+本分支做了**两层**适配：
+
+1. **字段改名**（v1.1）：Android 17 把扫描投递相关的类从 Java 重写成 Kotlin，内部字段去掉了 `m` 前缀
+2. **Xposed API 迁移**（v2.0）：旧版 Xposed API 在 Android 17 上已被禁用，本分支整体迁移到
+   **libxposed modern API 102**
+
 ---
 
 ## 一、为什么上游在 Android 17 上失效
@@ -36,8 +42,11 @@ Failed to deliver to scan client: com.android.bluetooth.le_scan.ScanClient#mScan
 | `hook/ReflectCompat.kt` | **新增**。跨版本反射兼容层：按候选名依次探测字段 / getter，命中后缓存 `Field`/`Method`。int/long/Integer/Long 互认，避免参数类型差异导致匹配失败。 |
 | `hook/VirtualDeviceInjector.kt` | 投递不再硬编码字段名，改走三条候选路径（见下）；全部失败时**打印一次** `ScanClient` / `ScannerApp` 的真实字段表，照着加候选名即可，不用再逆向。 |
 | `hook/BluetoothScanHook.kt` | `mScanManager` / `mScannerMap` / `getRegularScanQueue()` 全部改多候选探测（含 `ScanHelper` 兜底）；精确签名找不到时退化为「同名 + 11 参数 + 第 3 个是 String」。新增**保活注入**。 |
-| `hook/HookEntry.kt` | 不再往 `/data/system` 写状态文件（Android 17 上蓝牙进程是 `bluetooth` uid，必抛 EACCES，且那个文件根本没有代码读取）。改成静默降级，不再打 ERROR 误导人。 |
-| `hook/ScanResultBuilder.kt` | **修复设备名不生效**。上游把 `deviceName` 传进 `buildScanResult()` 却从未使用，只在点「根据设备名称自动生成广播数据」时才把名字拼进 `advDataHex`。现在改成：广播数据里若没有 Local Name（AD 类型 `0x08`/`0x09`）就把设备名补进去，已有的不覆盖；空间不足时按 UTF-8 安全边界截断并改用 `0x08`(Shortened)。 |
+| `hook/ModuleEntry.kt` | **新增**，取代上游的 `HookEntry.kt`。modern API 的入口，继承 `XposedModule`：`onModuleLoaded` 绑定日志后端，`onPackageReady` 校验包名后从 Remote Preferences 读配置并挂 Hook。 |
+| `data/bridge/ConfigBridge.kt` | App 侧配置桥接改为 **Remote Preferences**（`XposedServiceHelper` 监听框架服务绑定）。框架没连上时降级为本地私有偏好，App 仍可正常使用，只是配置传不到蓝牙进程。 |
+| `utils/Logger.kt` | 日志后端从 `XposedBridge.log` 改为 `XposedInterface.log`，未绑定框架时自动退回 `android.util.Log`。 |
+| `hook/ScanResultBuilder.kt` | **修复设备名不生效**。上游把 `deviceName` 传进 `buildScanResult()` 却从未使用，只在点「根据设备名称自动生成广播数据」时才把名字拼进 `advDataHex`。现在改成：广播数据里若没有 Local Name（AD 类型 `0x08`/`0x09`）就把设备名补进去，已有的不覆盖；空间不足时按 UTF-8 安全边界截断并改用 `0x08`(Shortened)。同时去掉 `XposedHelpers`，改纯 JDK 反射构造 `ScanResult`。 |
+| `META-INF/xposed/*`、`module.prop`、`scope.list` | **新增**。modern API 的模块清单，取代旧的 `assets/xposed_init` 和 AndroidManifest 里的 `xposed*` meta-data。 |
 | `.github/workflows/build.yml` | **新增**。推上去就能出 APK，release 版是主要交付物。 |
 
 ### 设备名称是怎么生效的
@@ -67,6 +76,35 @@ Failed to deliver to scan client: com.android.bluetooth.le_scan.ScanClient#mScan
 仍然受每个设备自己的「广播间隔」节流。不想要就在
 `hook/BluetoothScanHook.kt` 里把 `ENABLE_KEEPALIVE` 改成 `false`。
 
+## 二之二、迁移到 libxposed modern API（v2.0）
+
+**为什么必须迁移**：旧版 Xposed API（`de.robv.android.xposed.*`）在 Android 17 上被框架禁用，
+模块根本加载不起来。本分支整体改用 [libxposed](https://github.com/libxposed) 的
+**modern API 102**，这是目前 Android 17 上唯一可用的模块接口。
+
+主要差异（如需自己改代码，这几点最容易踩）：
+
+| 项目 | 旧版 legacy API | 本分支（modern API 102） |
+|---|---|---|
+| 入口声明 | `assets/xposed_init`，内容是入口类名 | `META-INF/xposed/java_init.list` |
+| 模块元数据 | 5 个 `xposed*` meta-data 写进 AndroidManifest | `META-INF/xposed/module.prop`（`minApiVersion`/`targetApiVersion`/`staticScope`/`exceptionMode`） |
+| 作用域 | `xposedscope` meta-data | `META-INF/xposed/scope.list`，一行一个包名 |
+| 入口基类 | 实现 `IXposedHookLoadPackage` 接口 | 继承 `io.github.libxposed.api.XposedModule`，重写 `onModuleLoaded` / `onPackageReady` |
+| 反射工具 | `XposedHelpers.findAndHookMethod(...)` | **已移除**。改用 `xposed.hook(method).intercept { chain -> ... }`，配 `ReflectCompat` 纯 JDK 反射找类找方法 |
+| 配置传递 | `XSharedPreferences` 直接读模块的私有 XML | **模块 App 自身不再被 hook**，改用 Remote Preferences：App 侧 `XposedService.getRemotePreferences()` 写，模块侧读到快照 |
+| 日志 | `XposedBridge.log(...)` | `XposedInterface.log(...)`，本分支封装在 `utils/Logger.kt` 的 `Logger.bind(xposed)` |
+
+两条现代 API 带来的硬约束，构建时容易卡住：
+
+- **`compileSdk` 必须 ≥ 37**：`libxposed:service 102.0.0` 的 aar-metadata 声明了 `minCompileSdk`，
+  低于该值 AGP 直接报 `Dependency ... requires compile against version 37`
+- **Java 语言级别必须 ≥ 17**：`service 102.0.0` 内部用了 Java `record`（`HotReloadResult`），
+  D8 需要 core library desugaring 才能生成 global synthetic。而 AGP 的
+  `ComponentImpl.isGlobalSyntheticsEnabled()` 在 `debuggable` 变体上要求
+  source/target compatibility `isCompatibleWith(VERSION_14)`，否则 dex 阶段报
+  `Attempt to create a global synthetic for 'Record desugaring' without a global-synthetics consumer`
+  （release 变体因为 `debuggable=false` 反而不会触发，所以「release 能过、debug 过不去」是这个原因）
+
 ## 三、⚠️ 重要限制：这是"本机注入"，不是真广播
 
 本模块是在**系统把扫描结果交给 App 之前**塞进去一条伪造的 `ScanResult`。
@@ -90,6 +128,11 @@ Failed to deliver to scan client: com.android.bluetooth.le_scan.ScanClient#mScan
 > ⚠️ **两者只能启用一个**：它们是同一层框架的两个版本，同时激活会让作用域设置互相覆盖、
 > 注入的 Xposed API 版本冲突。管理器里的「启用/停用」开关实际就是在
 > `/data/adb/modules/<模块 id>/` 下增删一个空的 `disable` 文件，切换后**必须重启手机**才生效。
+
+> 🔴 **框架必须支持 modern API 102**。本模块 v2.0 起不再使用旧版 Xposed API，
+> 因此老版本 LSPosed / EdXposed 即使能装上本模块，也不会加载它
+> （表现：框架里看不到模块，或模块一直显示未激活）。认准 `module.prop` 里
+> `minApiVersion` ≥ 101、`targetApiVersion` ≥ 102 的框架版本。
 
 ## 五、安装步骤
 
@@ -129,7 +172,7 @@ Failed to deliver to scan client: com.android.bluetooth.le_scan.ScanClient#mScan
 
 ### 方法 B：本地构建
 
-需要 **JDK 17** + **Android SDK（platform 36 + build-tools 36.0.0）**：
+需要 **JDK 17** + **Android SDK（platform 37 + build-tools 37.0.0）**：
 
 ```bash
 # Windows —— 出正式版（release）
@@ -168,6 +211,15 @@ export ANDROID_HOME=/path/to/android-sdk
 >
 > Maven 依赖（`dl.google.com` / `repo1.maven.org`）一般没问题，不用换源。
 
+> 📦 **如果 Gradle 报 `Dependency 'io.github.libxposed:service:102.0.0' requires compile against version 37`**：
+> 说明 `compileSdk` 低于 37，或 SDK 里没装 `platforms;android-37.0`。
+> 装上即可：`sdkmanager "platforms;android-37.0" "build-tools;37.0.0"`。
+
+> 🧩 **如果 dex 阶段报 `Attempt to create a global synthetic for 'Record desugaring'`**：
+> 说明 Java 语言级别低于 17 或没开 core library desugaring。
+> 本分支 `app/build.gradle.kts` 已设为 `JavaVersion.VERSION_17` 并开启
+> `isCoreLibraryDesugaringEnabled`，改回去会重新触发这个错误（原因见「二之二」）。
+
 ## 七、排障
 
 **看日志**（所有 Hook 层日志都以 `BTHook:` 开头）：
@@ -199,7 +251,10 @@ adb logcat | grep BTHook
 **其他情况**：
 
 - 看不到虚拟设备 → 确认框架里模块**已启用**且作用域勾了 `com.android.bluetooth`，然后开关一次蓝牙或重启
+- **框架里根本看不到本模块** → 框架版本太旧，不支持 modern API 102。换 Vector 或 LSPosed v2.2.1+
 - 改了配置不生效 → 配置是实时读取的，但需要有一次扫描在进行；下拉刷新 / 重新进扫描页
+- **改了配置，蓝牙进程那边一直是旧值** → Remote Preferences 是**快照**语义，读到后不会自动刷新
+  （`XposedService.getRemotePreferences()` 会缓存实例）。开关一次蓝牙让模块重新加载即可
 - 只看到真实设备 → 看日志有没有 `Injected virtual device`，没有的话把日志贴出来
 - 目标 App 扫不到但别的 App 能扫到 → 该 App 可能用了 `PendingIntent` 方式的扫描，
   或者按 service UUID / 名称做了过滤，把虚拟设备的广播数据改成符合它过滤条件的内容
@@ -229,6 +284,8 @@ adb logcat | grep BTHook
 - 上游项目：[jingyu233/BluetoothHook](https://github.com/jingyu233/BluetoothHook) by jingyu233
 - Android 17 字段改名的定位参考了 [issue #8](https://github.com/jingyu233/BluetoothHook/issues/8)
   及 fork [whao123yahoo/BluetoothHook](https://github.com/whao123yahoo/BluetoothHook) 的 `d78964c7`
+- legacy → modern Xposed API 迁移依据官方文档
+  [Develop Xposed Modules Using Modern Xposed API](https://github.com/LSPosed/LSPosed/wiki/Develop-Xposed-Modules-Using-Modern-Xposed-API)
 - 许可沿用上游，见 [LICENSE](LICENSE)
 
 > ⚠️ 本项目仅供学习研究和合法的开发调试使用。严禁用于任何非法目的。使用造成的任何后果由使用者自行承担。

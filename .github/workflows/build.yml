@@ -40,10 +40,12 @@ jobs:
         with:
           packages: 'platform-tools'
 
+      # compileSdk 37：libxposed:service 102.0.0 的 aar-metadata 要求 minCompileSdk，
+      # 目标是 Android 17（API 37），所以必须装 android-37 平台与对应 build-tools。
       - name: Install SDK packages
         run: |
           yes | sdkmanager --licenses > /dev/null 2>&1 || true
-          sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0" "build-tools;35.0.0"
+          sdkmanager "platform-tools" "platforms;android-37.0" "build-tools;37.0.0" "platforms;android-36" "build-tools;36.0.0"
 
       - name: Show toolchain versions
         run: |

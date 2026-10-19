@@ -24,14 +24,19 @@
 # BluetoothHook Xposed Module ProGuard Rules
 # ============================================================
 
-# ========== Xposed Framework ==========
-# Keep all Xposed API classes and their methods
--keep class de.robv.android.xposed.** { *; }
--keep interface de.robv.android.xposed.** { *; }
+# ========== libxposed (modern Xposed API 102) ==========
+# 入口类由框架按 META-INF/xposed/java_init.list 里的全限定名反射实例化，
+# 必须保留类名和无参构造。
+-keep,allowoptimization,allowobfuscation public class * extends io.github.libxposed.api.XposedModule {
+    public <init>();
+}
+-dontwarn io.github.libxposed.annotation.**
+# 入口清单里的类名若被混淆需同步改写（当前 minify 关闭，保留规则以防将来开启）
+-adaptresourcefilecontents META-INF/xposed/java_init.list
 
 # Keep the main hook entry point
--keep class com.jingyu233.bluetoothhook.hook.HookEntry {
-    public void handleLoadPackage(...);
+-keep class com.jingyu233.bluetoothhook.hook.ModuleEntry {
+    public <init>();
 }
 
 # Keep all hook classes and their methods (accessed via reflection)
