@@ -12,7 +12,7 @@
 1. **字段改名**（v1.1）：Android 17 把扫描投递相关的类从 Java 重写成 Kotlin，内部字段去掉了 `m` 前缀
 2. **Xposed API 迁移**（v2.0）：旧版 Xposed API 在 Android 17 上已被禁用，本分支整体迁移到
    **libxposed modern API 102**
-3. **交互修正**（v2.1）：Hook 状态冷启动误报「未激活」、关于页版本号与仓库地址写死，详见「二之三」
+3. **交互修正**（v2.1）：Hook 状态冷启动误报「未激活」、关于页版本号与仓库地址写死
 
 ---
 
@@ -77,49 +77,6 @@ Failed to deliver to scan client: com.android.bluetooth.le_scan.ScanClient#mScan
 仍然受每个设备自己的「广播间隔」节流。不想要就在
 `hook/BluetoothScanHook.kt` 里把 `ENABLE_KEEPALIVE` 改成 `false`。
 
-## 二之二、迁移到 libxposed modern API（v2.0）
-
-**为什么必须迁移**：旧版 Xposed API（`de.robv.android.xposed.*`）在 Android 17 上被框架禁用，
-模块根本加载不起来。本分支整体改用 [libxposed](https://github.com/libxposed) 的
-**modern API 102**，这是目前 Android 17 上唯一可用的模块接口。
-
-主要差异（如需自己改代码，这几点最容易踩）：
-
-| 项目 | 旧版 legacy API | 本分支（modern API 102） |
-|---|---|---|
-| 入口声明 | `assets/xposed_init`，内容是入口类名 | `META-INF/xposed/java_init.list` |
-| 模块元数据 | 5 个 `xposed*` meta-data 写进 AndroidManifest | `META-INF/xposed/module.prop`（`minApiVersion`/`targetApiVersion`/`staticScope`/`exceptionMode`） |
-| 作用域 | `xposedscope` meta-data | `META-INF/xposed/scope.list`，一行一个包名 |
-| 入口基类 | 实现 `IXposedHookLoadPackage` 接口 | 继承 `io.github.libxposed.api.XposedModule`，重写 `onModuleLoaded` / `onPackageReady` |
-| 反射工具 | `XposedHelpers.findAndHookMethod(...)` | **已移除**。改用 `xposed.hook(method).intercept { chain -> ... }`，配 `ReflectCompat` 纯 JDK 反射找类找方法 |
-| 配置传递 | `XSharedPreferences` 直接读模块的私有 XML | **模块 App 自身不再被 hook**，改用 Remote Preferences：App 侧可写，注入进程侧只读，改动由框架回调增量推送 |
-| 日志 | `XposedBridge.log(...)` | `XposedInterface.log(...)`，本分支封装在 `utils/Logger.kt` 的 `Logger.bind(xposed)` |
-
-两条现代 API 带来的硬约束，构建时容易卡住：
-
-- **`compileSdk` 必须 ≥ 37**：`libxposed:service 102.0.0` 的 aar-metadata 声明了 `minCompileSdk`，
-  低于该值 AGP 直接报 `Dependency ... requires compile against version 37`
-- **Java 语言级别必须 ≥ 17**：`service 102.0.0` 内部用了 Java `record`（`HotReloadResult`），
-  D8 需要 core library desugaring 才能生成 global synthetic。而 AGP 的
-  `ComponentImpl.isGlobalSyntheticsEnabled()` 在 `debuggable` 变体上要求
-  source/target compatibility `isCompatibleWith(VERSION_14)`，否则 dex 阶段报
-  `Attempt to create a global synthetic for 'Record desugaring' without a global-synthetics consumer`
-  （release 变体因为 `debuggable=false` 反而不会触发，所以「release 能过、debug 过不去」是这个原因）
-
-## 二之三、v2.1 修掉的三个交互问题
-
-v2.0 在真机上跑通后暴露的都不是注入逻辑的问题，而是 App 界面的时序与硬编码：
-
-| 现象 | 根因 | 修法 |
-|---|---|---|
-| 每次清后台重进，先闪「Hook未激活」，点右上角刷新又变「已激活」 | `ConfigBridge.getHookStatus()` 开头 `service ?: return "Inactive"`。框架 binder 是 `XposedProvider.call()` 在 binder 线程**异步**送进来的，ViewModel `init` 同步查询时必然还没到 | 加三态 `connected: StateFlow<Boolean?>`（`null` 等待 / `false` 确定连不上 / `true` 已连上）+ `FRAMEWORK_BIND_TIMEOUT_MS = 1500ms` 超时兜底；ViewModel 改用 `awaitHookStatus()` 挂起等待，之后 `collect` 跟随连接状态自动刷新。等待期内显示「正在检测…」而不是「未激活」 |
-| 关于页版本号永远是 `1.0.0` | `SettingsScreen.kt` 里 `text = "版本 1.0.0"` 是硬编码字符串 | 读 `BuildConfig.VERSION_NAME`，并在 `build.gradle.kts` 打开 `buildFeatures { buildConfig = true }`（AGP 8 起默认关闭） |
-| 关于页「开源项目」链到上游 `jingyu233/bluetoothhook` | `val githubUrl` 写的是上游地址 | 改为 `https://github.com/MentholTea/BluetoothHook-Android17` |
-
-顺带把界面里残留的「请在 LSPosed 中启用模块」「作用域要勾系统框架」等 legacy 时代文案改掉了 ——
-modern API 下作用域由 `module.prop` 的 `staticScope=true` + `scope.list` 固定，用户不需要也不应该在
-框架里手动勾选。
-
 ## 三、⚠️ 重要限制：这是"本机注入"，不是真广播
 
 本模块是在**系统把扫描结果交给 App 之前**塞进去一条伪造的 `ScanResult`。
@@ -149,93 +106,7 @@ modern API 下作用域由 `module.prop` 的 `staticScope=true` + `scope.list` �
 > （表现：框架里看不到模块，或模块一直显示未激活）。认准 `module.prop` 里
 > `minApiVersion` ≥ 101、`targetApiVersion` ≥ 102 的框架版本。
 
-## 五、安装步骤
-
-1. **Root + Zygisk**：Magisk / KernelSU 里启用 Zygisk（或用 Zygisk Next 模块）
-2. **装 Xposed 框架**：Vector 或 LSPosed v2.2.1+，安装后重启确认框架激活
-3. **装本模块 APK**（见下方「自己构建」）
-4. **在框架里启用模块**，进入模块的**作用域**设置，**勾选 `com.android.bluetooth`**（只有这一个）
-5. **让蓝牙进程重新加载**：最稳的是关掉再打开蓝牙；不生效就重启手机
-6. 打开本 App，点右下角 `+` 添加虚拟设备，填：
-   - **设备名称**：出现在扫描列表里的名字
-   - **MAC 地址**：`AA:BB:CC:DD:EE:FF`
-   - **RSSI**：`-100 ~ 0`，越接近 0 信号越强
-   - **广播数据**：十六进制，Legacy 最多 31 字节
-   - **扫描响应数据**：可选
-   - **广播间隔**：毫秒，控制虚拟设备重复出现的频率
-7. 保存后到目标 App 里发起扫描即可看到
-
-## 六、自己构建
-
-### 方法 A：GitHub Actions（推荐，不用装任何东西）
-
-1. Fork 本仓库（或者把整个目录推到你的私有仓库）
-2. 进 **Actions** 标签页，选 `Build APK`，点 **Run workflow**
-3. 构建完成后在该次运行的 **Artifacts** 里下载 `BluetoothHook-Android17-apk`
-4. 里面有两个文件：
-   - `BluetoothHook-Android17-release.apk` ← **正式版，用这个**
-   - `BluetoothHook-Android17-debug.apk` ← 仅用于排障（带 `debuggable` 标记）
-
-推 `v*` 形式的 tag（例如 `v2.1`）会自动创建 Release 并附上 APK。
-
-> 未配置 Secrets 时，每次构建都会生成**一次性签名密钥**，所以不同次构建的 release APK 签名不同，
-> 覆盖安装会失败（报 `INSTALL_FAILED_UPDATE_INCOMPATIBLE`），需要先卸载。
-> **想固定签名**（可以覆盖升级）就在仓库 Secrets 里配：
-> `SIGNING_KEYSTORE_BASE64`（keystore 文件的 base64）、`SIGNING_STORE_PASSWORD`、
-> `SIGNING_KEY_ALIAS`、`SIGNING_KEY_PASSWORD`，工作流会自动改用你的密钥。
-> 本成品包里已经附了一份现成的密钥，见 `签名密钥/`。
-
-### 方法 B：本地构建
-
-需要 **JDK 17** + **Android SDK（platform 37 + build-tools 37.0.0）**：
-
-```bash
-# Windows —— 出正式版（release）
-set JAVA_HOME=C:\path\to\jdk17
-set ANDROID_HOME=C:\path\to\android-sdk
-gradlew.bat assembleRelease ^
-  -Pandroid.injected.signing.store.file=D:\path\to\签名密钥\bluetoothhook-release.keystore ^
-  -Pandroid.injected.signing.store.password=android ^
-  -Pandroid.injected.signing.key.alias=bthook ^
-  -Pandroid.injected.signing.key.password=android
-
-# Linux / macOS
-export JAVA_HOME=/path/to/jdk17
-export ANDROID_HOME=/path/to/android-sdk
-./gradlew assembleRelease \
-  -Pandroid.injected.signing.store.file=/path/to/bluetoothhook-release.keystore \
-  -Pandroid.injected.signing.store.password=android \
-  -Pandroid.injected.signing.key.alias=bthook \
-  -Pandroid.injected.signing.key.password=android
-```
-
-产物：
-- release → `app/build/outputs/apk/release/app-release.apk`
-- debug → `app/build/outputs/apk/debug/app-debug.apk`（`gradlew assembleDebug`，用内置 debug keystore 自动签名）
-
-> 🀄 **国内网络注意**：`services.gradle.org` 的大文件下载经常在中途被重置
-> （报 `Downloading ... failed: timeout` 或 `远程主机强迫关闭了一个现有的连接`）。
-> 解决办法是手动把 `gradle-8.13-bin.zip` 从镜像下下来，塞进 Gradle 的缓存目录：
->
-> ```powershell
-> $d = "$env:USERPROFILE\.gradle\wrapper\dists\gradle-8.13-bin\<那一串哈希>"
-> # 从 https://mirrors.huaweicloud.com/gradle/gradle-8.13-bin.zip 下载到 $d\gradle-8.13-bin.zip
-> tar -xf "$d\gradle-8.13-bin.zip" -C $d
-> New-Item -ItemType File "$d\gradle-8.13-bin.zip.ok"
-> ```
->
-> Maven 依赖（`dl.google.com` / `repo1.maven.org`）一般没问题，不用换源。
-
-> 📦 **如果 Gradle 报 `Dependency 'io.github.libxposed:service:102.0.0' requires compile against version 37`**：
-> 说明 `compileSdk` 低于 37，或 SDK 里没装 `platforms;android-37.0`。
-> 装上即可：`sdkmanager "platforms;android-37.0" "build-tools;37.0.0"`。
-
-> 🧩 **如果 dex 阶段报 `Attempt to create a global synthetic for 'Record desugaring'`**：
-> 说明 Java 语言级别低于 17 或没开 core library desugaring。
-> 本分支 `app/build.gradle.kts` 已设为 `JavaVersion.VERSION_17` 并开启
-> `isCoreLibraryDesugaringEnabled`，改回去会重新触发这个错误（原因见「二之二」）。
-
-## 七、排障
+## 五、排障
 
 **看日志**（所有 Hook 层日志都以 `BTHook:` 开头）：
 
@@ -282,28 +153,7 @@ adb logcat | grep BTHook
   手动填过「广播数据」且里面已有 `0x08`/`0x09` 段时不会被覆盖，以你填的为准
 - 同时装了 Vector 和 LSPosed → 只能启用一个，切换后必须重启手机
 
-## 八、成品包内容
-
-```
-模拟蓝牙设备-Android17/
-├── BluetoothHook-Android17-release.apk   ← 正式版 v2.1，直接安装
-├── BluetoothHook-Android17-debug.apk     ← 排障用（带 debuggable 标记）
-├── README.md                              ← 本文件
-├── 上传到GitHub-详细步骤.md                 ← 建仓 / 浏览器授权推送 / Secrets 的全流程
-├── push-to-github.ps1                     ← 推送提交到 main（只产生 Actions Artifacts）
-├── make-release.ps1                       ← 打 tag 推送，让 CI 生成 Releases 页面
-├── 源码/
-│   └── BluetoothHook-Android17-src.zip   ← 完整源码，含 GitHub Actions 工作流
-└── 签名密钥/
-    ├── bluetoothhook-release.keystore    ← 与 release APK 配套的签名密钥
-    └── keystore-base64.txt               ← 上面这份密钥的 base64（整行贴进 Secrets 用）
-```
-
-> ⚠️ **签名密钥很重要**：以后重新构建想覆盖升级，必须用同一份 `bluetoothhook-release.keystore`
-> （口令见 README「方法 B：本地构建」）。密钥丢了就只能卸载后重装。
-> 想在自己的 GitHub Actions 里固定签名，把 keystore 转成 base64 存进上面说的 Secrets 即可。
-
-## 九、鸣谢与许可
+## 六、鸣谢与许可
 
 - 上游项目：[jingyu233/BluetoothHook](https://github.com/jingyu233/BluetoothHook) by jingyu233
 - Android 17 字段改名的定位参考了 [issue #8](https://github.com/jingyu233/BluetoothHook/issues/8)
